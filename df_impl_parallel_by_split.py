@@ -1,4 +1,6 @@
-# import findspark
+from common_utils import printls
+import findspark
+
 from pyspark.sql import *  # type: ignore
 from pyspark.streaming import StreamingContext
 from pyspark.sql.types import *  # type: ignore
@@ -15,12 +17,7 @@ RANDOM_SEED = 42
 random.seed(42)
 np.random.seed(RANDOM_SEED)
 
-# findspark.init()
-
-
-def printls(*s):
-    s = " ".join([str(x) for x in s])
-    print(f"{'-'*10}\n{s}\n{'-'*10}")
+findspark.init()
 
 
 def init_spark(
@@ -71,15 +68,11 @@ class DecisionTreeClassifier:
             "right": right_subtree,
         }
 
-    def _get_feature_indices(self, num_features):
+    def _get_feature_indices(self, num_features) -> np.ndarray:
         return np.arange(num_features)
 
-    def _find_best_split(self, X, y, feature_indices):
-        best_split_feature = None
-        best_split_value = None
-        best_score = float("inf")
-
-        for feature in feature_indices:
+    def _find_best_split(self, X, y, feature_indices: np.ndarray):
+        def get_best_split(feature):
             if len(np.unique(X[:, feature])) > 10:
                 unique_values = np.linspace(
                     np.min(X[:, feature]), np.max(X[:, feature]), 10
@@ -95,10 +88,20 @@ class DecisionTreeClassifier:
                 else:
                     score = self._gini_index(y[left_indices], y[right_indices])
 
-                if score < best_score:
-                    best_score = score
-                    best_split_feature = feature
-                    best_split_value = value
+            return score, feature, value  # type: ignore
+
+        best_split_feature = None
+        best_split_value = None
+        best_score = float("inf")
+
+        df_indices = spark.createDataFrame(
+            feature_indices, StructType([StructField("feature", IntegerType())])
+        )
+
+        df_indices = df_indices.repartition(32)
+        something = df_indices.rdd.map(get_best_split).collect()
+        print(something)
+        exit()
 
         return best_split_feature, best_split_value
 
@@ -118,6 +121,7 @@ class DecisionTreeClassifier:
             len(y_left) / (len(y_left) + len(y_right)) * entropy_left
             + len(y_right) / (len(y_left) + len(y_right)) * entropy_right
         )
+
         return weighted_entropy
 
     def _gini_index(self, y_left, y_right):
@@ -164,7 +168,9 @@ def fit_decision_tree(row):
 
 if __name__ == "__main__":
     spark, sc = init_spark()
-    X = np.random.rand(100_000, 10)
+    X = np.repeat(
+        np.repeat(load("data/all_categorical_arr.joblib"), 10, axis=0), 5, axis=1
+    ).astype(float)
     y = np.random.randint(0, 2, X.shape[0])
     printls(f"max parallel: {sc.defaultParallelism}")
     print(X.shape, y.shape)
@@ -180,32 +186,21 @@ if __name__ == "__main__":
         selected_cols = random.sample(range(num_cols), num_cols // 2)
 
         # Create a new row with bootstrapped X and corresponding y
-        new_row = Row(X=X[indices][:, selected_cols].tolist(), y=y[indices].tolist())
+        X_local, y_local = X[indices][:, selected_cols], y[indices]
 
         # Add the row to the list
-        rows.append(new_row)
+        rows.append((X_local, y_local))
 
-    for n_partition in range(8, 129, 8):
-        start_time = time()
-        df = spark.createDataFrame(
-            rows,
-            StructType(
-                [
-                    StructField("X", ArrayType(ArrayType(DoubleType()))),
-                    StructField("y", ArrayType(IntegerType())),
-                ]
-            ),
-        )
+    start_time = time()
+    decision_tree_models = []
+    for X_local, y_local in rows:
+        clf = DecisionTreeClassifier()
+        clf.fit(X_local, y_local)
+        decision_tree_models.append(clf)
 
-        if n_partition > 0:
-            df = df.repartition(n_partition)
-
-        # Apply the function to each row in the DataFrame
-        decision_tree_models = df.rdd.map(fit_decision_tree).collect()
-
-        test_sample = rows[0]
-        X_test = np.array(test_sample.X)
-        y_test = np.array(test_sample.y)
-        res_1 = decision_tree_models[0].predict(X_test)
-        res_2 = decision_tree_models[1].predict(X_test)
-        printls(f"{n_partition} -  Total time used in seconds: {time() - start_time}")
+    test_sample = rows[0]
+    X_test = rows[0][0]
+    y_test = rows[0][1]
+    res_1 = decision_tree_models[0].predict(X_test)
+    res_2 = decision_tree_models[1].predict(X_test)
+    printls(f"Total time used in seconds: {time() - start_time}")

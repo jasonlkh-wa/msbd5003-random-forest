@@ -1,4 +1,5 @@
-# import findspark
+from common_utils import printls
+import findspark
 from pyspark.sql import *  # type: ignore
 from pyspark.streaming import StreamingContext
 from pyspark.sql.types import *  # type: ignore
@@ -15,12 +16,7 @@ RANDOM_SEED = 42
 random.seed(42)
 np.random.seed(RANDOM_SEED)
 
-# findspark.init()
-
-
-def printls(*s):
-    s = " ".join([str(x) for x in s])
-    print(f"{'-'*10}\n{s}\n{'-'*10}")
+findspark.init()
 
 
 def init_spark(
@@ -87,9 +83,10 @@ class DecisionTreeClassifier:
             else:
                 unique_values = np.unique(X[:, feature])
             for value in unique_values:
-                left_indices = X[:, feature] <= value
-                right_indices = X[:, feature] > value
+                left_indices = X[:, feature] <= value  # .astype(int)
+                right_indices = X[:, feature] > value  # .astype(int)
 
+                # print(left_indices)
                 if self.criterion == "entropy":
                     score = self._entropy(y[left_indices], y[right_indices])
                 else:
@@ -150,13 +147,9 @@ class DecisionTreeClassifier:
         return node["class"]
 
 
-def fit_decision_tree(row):
-    # Convert the row into numpy arrays
-    X = np.array(row.X)
-    y = np.array(row.y)
-
+def fit_decision_tree(X, y):
     # Fit a decision tree model
-    decision_tree = DecisionTreeClassifier()
+    decision_tree = DecisionTreeClassifier(criterion="gini")
     model = decision_tree.fit(X, y)
 
     return model
@@ -164,6 +157,7 @@ def fit_decision_tree(row):
 
 if __name__ == "__main__":
     spark, sc = init_spark()
+    # X = np.repeat(load("data/all_categorical_arr.joblib"), 10, axis=0).astype(float)
     X = np.random.rand(100_000, 10)
     y = np.random.randint(0, 2, X.shape[0])
     printls(f"max parallel: {sc.defaultParallelism}")
@@ -180,32 +174,19 @@ if __name__ == "__main__":
         selected_cols = random.sample(range(num_cols), num_cols // 2)
 
         # Create a new row with bootstrapped X and corresponding y
-        new_row = Row(X=X[indices][:, selected_cols].tolist(), y=y[indices].tolist())
+        new_row = X[indices][:, selected_cols], y[indices]
 
         # Add the row to the list
         rows.append(new_row)
 
-    for n_partition in range(8, 129, 8):
-        start_time = time()
-        df = spark.createDataFrame(
-            rows,
-            StructType(
-                [
-                    StructField("X", ArrayType(ArrayType(DoubleType()))),
-                    StructField("y", ArrayType(IntegerType())),
-                ]
-            ),
-        )
+    start_time = time()
+    decision_tree_models = []
+    for X_local, y_local in rows:
+        clf = DecisionTreeClassifier()
+        clf.fit(X_local, y_local)
+        decision_tree_models.append(clf)
 
-        if n_partition > 0:
-            df = df.repartition(n_partition)
-
-        # Apply the function to each row in the DataFrame
-        decision_tree_models = df.rdd.map(fit_decision_tree).collect()
-
-        test_sample = rows[0]
-        X_test = np.array(test_sample.X)
-        y_test = np.array(test_sample.y)
-        res_1 = decision_tree_models[0].predict(X_test)
-        res_2 = decision_tree_models[1].predict(X_test)
-        printls(f"{n_partition} -  Total time used in seconds: {time() - start_time}")
+    X_test, y_test = rows[0]
+    res_1 = decision_tree_models[0].predict(X_test)
+    res_2 = decision_tree_models[1].predict(X_test)
+    printls(f"Total time used in seconds: {time() - start_time}")
